@@ -4,6 +4,6 @@ import { BackofficeService } from './backoffice.service';
 
 @Module({
   controllers: [BackofficeController],
-  providers: [BackofficeService]
+  providers: [BackofficeService],
 })
 export class BackofficeModule {}
