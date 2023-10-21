@@ -1,8 +1,10 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { OwnerType } from '@prisma/client';
 import * as Docker from 'dockerode';
-import { CreateEnvironmentDto } from './dto/create-environment';
-import { InitEnvrionmentResponse } from './response/init-environment.response';
 import { findFreePorts } from 'find-free-ports';
+import { PrismaService } from 'src/prisma/prisma.service';
+import { CreateStudentEnvironmentDto } from './dto/create-student-environment';
+import { InitializeClassDto } from './dto/initialize-class.dto';
 
 @Injectable()
 export class BackofficeService {
@@ -15,62 +17,67 @@ export class BackofficeService {
    */
   private docker: Docker;
 
+  private host = process.env.ENV_HOST;
+
   private defaultMemoryLimit = 2;
-  constructor() {
+  private commonEnv = ['PUID=1000', 'PGID=1000', 'TZ=Asia/Seoul'];
+  private dockerImage = 'lscr.io/linuxserver/code-server:latest';
+
+  constructor(private prisma: PrismaService) {
     this.docker = new Docker();
   }
 
-  async createEnvironments(dto: CreateEnvironmentDto) {
-    const { instructorId, classId, studentCount, memoryLimit } = dto;
-    const salt = this.generateSalt(instructorId, classId);
-    const shareVolumeName = `${salt}_share`;
+  /** Instructor Call this api to initialize class environment */
+  async initializeClass(dto: InitializeClassDto) {
+    const { classId, instructorId, memory } = dto;
 
-    if (studentCount <= 0) {
-      throw new BadRequestException('Student Count should be upper than 1');
-    }
-
-    let filteredMemoryLimit = memoryLimit || this.defaultMemoryLimit;
-    if (!(memoryLimit && (memoryLimit < 0.5 || memoryLimit > 4))) {
-      filteredMemoryLimit = this.defaultMemoryLimit;
-    }
-
-    /** Allocatable ports */
-    const freePortList = await findFreePorts(studentCount + 1);
-
-    const result: InitEnvrionmentResponse = {
-      instructorEnv: {
-        containerId: '',
-        port: 0,
+    const findClass = await this.prisma.class.findUnique({
+      where: {
+        classId,
+        instructorId,
       },
-      studentEnv: [],
-    };
+    });
 
-    /** Generate Share Volume */
+    if (findClass) {
+      throw new BadRequestException('CLASS_ALREADY_INITIALZED');
+    }
+
+    const salt = this.generateSalt(instructorId, classId);
+    const shareVolumeName = this.shareVolumeName(salt);
+
+    let memoryLimit = memory || this.defaultMemoryLimit;
+
+    /** Memory Limit range check */
+    if (!(memoryLimit && (memoryLimit < 0.5 || memoryLimit > 4))) {
+      memoryLimit = this.defaultMemoryLimit;
+    }
+
+    /** Allocate free port */
+    const [freePort] = await findFreePorts(1);
+
+    /** Share Volume */
     await this.docker.createVolume({
       Name: shareVolumeName,
       Driver: 'local',
     });
 
-    // Common Env
-    const commonEnv = ['PUID=1000', 'PGID=1000', 'TZ=Asia/Seoul'];
-
-    /** Generate Instructor's envrironment  */
-    const instructorPort = freePortList[0];
+    /** Instructor Volume */
     const instructorVolumeName = `${classId}_instructor`;
     await this.docker.createVolume({
       Name: instructorVolumeName,
       Driver: 'local',
     });
+
     const instructorContainer = await this.docker.createContainer({
-      Image: 'lscr.io/linuxserver/code-server:latest',
+      Image: this.dockerImage,
       name: `${this.generateSalt(instructorId, classId)}_instructor`,
-      Env: [...commonEnv, 'SUDO_PASSWORD=password'],
+      Env: [...this.commonEnv, 'SUDO_PASSWORD=password'],
       HostConfig: {
-        Memory: this.GigaByteToByte(filteredMemoryLimit),
+        Memory: this.GigaByteToByte(memoryLimit),
         PortBindings: {
           '8443/tcp': [
             {
-              HostPort: `${instructorPort}`,
+              HostPort: `${freePort}`,
             },
           ],
         },
@@ -99,60 +106,118 @@ export class BackofficeService {
         '/config/workspace/share',
       ],
     }); // Set volume permission to instructor
-    result.instructorEnv.port = instructorPort;
-    result.instructorEnv.containerId = instructorContainer.id;
 
-    for (let i = 1; i < studentCount + 1; i++) {
-      const port = freePortList[i];
-      const containerName = `${this.generateSalt(instructorId, classId)}_${i}`;
-      const volumeName = `${containerName}_volume`;
-      await this.docker.createVolume({
-        Name: volumeName,
-        Driver: 'local',
-      });
-      const newContainer = await this.docker.createContainer({
-        Image: 'lscr.io/linuxserver/code-server:latest',
-        name: containerName,
-        Env: [...commonEnv, 'PASSWORD=password'],
-        HostConfig: {
-          Memory: this.GigaByteToByte(filteredMemoryLimit),
-          PortBindings: {
-            '8443/tcp': [
-              {
-                HostPort: `${port}`,
-              },
-            ],
+    /** Extract instructor container's ID */
+    const containerId = instructorContainer.id;
+
+    const host = `${this.host}:${freePort}`;
+
+    await this.prisma.class.create({
+      data: {
+        id: classId,
+        classId,
+        instructorId,
+        memoryLimit,
+        shareVolumeName,
+        envrionments: {
+          create: {
+            ownerId: instructorId,
+            containerId: instructorContainer.id,
+            endpoint: host,
+            ownerType: OwnerType.INSTRUCTOR,
           },
-          Mounts: [
+        },
+      },
+    });
+
+    return {
+      host,
+      containerId,
+    };
+  }
+
+  async createStudentEnvironment(dto: CreateStudentEnvironmentDto) {
+    const { classId, studentId } = dto;
+
+    const findClass = await this.prisma.class.findUnique({
+      where: {
+        classId,
+      },
+    });
+
+    if (!findClass) {
+      throw new BadRequestException('CLASS_YET_INITIALIZED');
+    }
+
+    const salt = this.generateSalt(studentId, classId);
+    const shareVolumeName = findClass.shareVolumeName;
+    const memoryLimit = findClass.memoryLimit;
+
+    /** Free port */
+    const [freePort] = await findFreePorts(1);
+
+    /** Student Volume */
+    const studentVolume = `${salt}_volume`;
+    await this.docker.createVolume({
+      Name: studentVolume,
+      Driver: 'local',
+    });
+
+    const studentContainer = await this.docker.createContainer({
+      Image: this.dockerImage,
+      name: salt,
+      Env: [...this.commonEnv, 'PASSWORD=password'],
+      HostConfig: {
+        Memory: this.GigaByteToByte(memoryLimit),
+        PortBindings: {
+          '8443/tcp': [
             {
-              Target: '/config/workspace',
-              Source: volumeName,
-              Type: 'volume',
-            },
-            {
-              Target: '/config/workspace/share',
-              Source: shareVolumeName,
-              Type: 'volume',
-              ReadOnly: true,
+              HostPort: `${freePort}`,
             },
           ],
         },
-      });
-      newContainer.start();
-      result.studentEnv.push({
-        containerId: newContainer.id,
-        port,
-      });
-    }
-
-    return result;
+        Mounts: [
+          {
+            Target: '/config/workspace',
+            Source: studentVolume,
+            Type: 'volume',
+          },
+          {
+            Target: '/config/workspace/share',
+            Source: shareVolumeName,
+            Type: 'volume',
+            ReadOnly: true,
+          },
+        ],
+      },
+    });
+    await studentContainer.start();
+    const host = `${this.host}:${freePort}`;
+    const containerId = studentContainer.id;
+    await this.prisma.environment.create({
+      data: {
+        ownerId: studentId,
+        containerId,
+        endpoint: host,
+        ownerType: 'STUDENT',
+        classId,
+      },
+    });
+    return {
+      host,
+      containerId,
+    };
   }
 
   private GigaByteToByte(gb: number) {
     return gb * 1024 * 1024 * 1024;
   }
 
-  private generateSalt(instructorId: string, classId: string) {
+  private generateSalt(instructorId: number, classId: number) {
     return `${instructorId}_${classId}`;
+  }
+
+  private shareVolumeName(salt: string) {
+    return `${salt}_share`;
   }
 }

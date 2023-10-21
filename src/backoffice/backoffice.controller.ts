@@ -1,8 +1,9 @@
 import { Body, Controller, Post } from '@nestjs/common';
-import { BackofficeService } from './backoffice.service';
-import { CreateEnvironmentDto } from './dto/create-environment';
 import { ApiOkResponse, ApiProperty, ApiTags } from '@nestjs/swagger';
-import { InitEnvrionmentResponse } from './response/init-environment.response';
+import { BackofficeService } from './backoffice.service';
+import { CreateStudentEnvironmentDto } from './dto/create-student-environment';
+import { InitializeClassDto } from './dto/initialize-class.dto';
+import { InitializeClassResponse } from './response/initialize-class.response';
 
 @Controller('backoffice')
 @ApiTags('Backoffice')
@@ -11,12 +12,25 @@ export class BackofficeController {
 
   @Post('/init')
   @ApiProperty({
-    description: '환경을 초기화합니다.',
+    description: '수업 환경을 초기화 합니다. Instructor가 수업 생성 후 실행됨.',
   })
   @ApiOkResponse({
-    type: InitEnvrionmentResponse,
+    type: InitializeClassResponse,
   })
-  public async createEnvironments(@Body() dto: CreateEnvironmentDto) {
-    return this.backofficeSerice.createEnvironments(dto);
+  public async createEnvironments(@Body() dto: InitializeClassDto) {
+    return this.backofficeSerice.initializeClass(dto);
+  }
+
+  @Post('/init/student')
+  @ApiProperty({
+    description: '수업 환경을 초기화 합니다. Instructor가 수업 생성 후 실행됨.',
+  })
+  @ApiOkResponse({
+    type: InitializeClassResponse,
+  })
+  public async createStudentEnvironments(
+    @Body() dto: CreateStudentEnvironmentDto,
+  ) {
+    return this.backofficeSerice.createStudentEnvironment(dto);
   }
 }
