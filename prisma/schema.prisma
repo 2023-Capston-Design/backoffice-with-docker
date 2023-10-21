@@ -1,0 +1,51 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+
+model Class {
+  id              Int     @id   @map("_id") 
+
+  classId         Int     @unique() 
+
+  instructorId    Int  
+
+  memoryLimit     Int    
+
+  shareVolumeName String
+
+  envrionments    Environment[]
+  
+  @@map("class")
+}
+
+model Environment {
+  id          String   @id   @default(auto())  @map("_id")   @db.ObjectId
+
+  ownerId     Int
+
+  containerId String
+
+  endpoint    String
+
+  ownerType   OwnerType
+
+  classId     Int   
+
+  class       Class    @relation(fields: [classId],references: [id], onDelete:Cascade)
+
+  @@map("environment")
+}
+
+enum OwnerType {
+  INSTRUCTOR
+  STUDENT
+}
