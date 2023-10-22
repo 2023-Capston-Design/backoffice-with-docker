@@ -1,8 +1,26 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { ValidationPipe } from '@nestjs/common';
+import { SwaggerDefinition } from './swagger.config';
+import { SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  await app.listen(3000);
+
+  app.enableCors({
+    origin: '*',
+  });
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+    }),
+  );
+
+  const { config, option } = SwaggerDefinition();
+  const document = SwaggerModule.createDocument(app, config.build());
+  SwaggerModule.setup('docs', app, document, option);
+
+  await app.listen(3500);
 }
 bootstrap();
